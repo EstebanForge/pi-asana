@@ -3,9 +3,14 @@ import type {
   AgentToolResult,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { callAsana, AsanaError } from "../api";
+import { callAsana, callAsanaUpload, AsanaError } from "../api";
 import { confirmWrite, willPromptForWrite } from "../confirm";
 import { resolveTasks, fmtTask, type ResolvedRef } from "../resolve";
+import {
+  validateImagePaths,
+  readImage,
+  buildStoryHtml,
+} from "../attachments";
 import { toToolResult, errorText, postedContentExtras, type AsanaDetails } from "../result";
 import type { AsanaStory } from "../types";
 import {
@@ -14,16 +19,26 @@ import {
   ADD_COMMENT_TASK_DESCRIPTION,
   ADD_COMMENT_TEXT_DESCRIPTION,
   ADD_COMMENT_HTML_DESCRIPTION,
+  ADD_COMMENT_IMAGES_DESCRIPTION,
 } from "../prompts";
 
 // Add a comment to a task. Asana calls comments "stories" of type `comment`.
 // POST `/tasks/{gid}/stories` with `text` (and `html_text` when markup was
 // supplied by the agent).
+//
+// With `images`, each file first uploads to the task via POST /attachments
+// (multipart, parent = task gid), and the story goes out as html_text with
+// one `<img data-asana-gid="..."/>` per attachment - the documented rich-text
+// mechanism that renders an image INLINE on a comment. See lib/attachments.ts
+// for the subtype/escaping constraints that make this work.
 const Params = Type.Object({
   task_gid: Type.String({ description: ADD_COMMENT_TASK_DESCRIPTION }),
   text: Type.String({ description: ADD_COMMENT_TEXT_DESCRIPTION, minLength: 1 }),
   html: Type.Optional(
     Type.Boolean({ description: ADD_COMMENT_HTML_DESCRIPTION }),
+  ),
+  images: Type.Optional(
+    Type.Array(Type.String({ description: ADD_COMMENT_IMAGES_DESCRIPTION })),
   ),
 });
 
@@ -103,12 +118,23 @@ export const addCommentTool: ToolDefinition<typeof Params, AsanaDetails> = {
     // any task lookup. Asana's silent literal-text fallback gives no HTTP
     // signal, so refusing here is the only way to keep broken HTML out of the
     // workspace. Plain-text mode (html falsy) is never validated: a literal
-    // "<" in prose is the caller's intent.
+    // "<" in prose is the caller's intent. Image paths get the same treatment:
+    // a missing file or unsupported type is a local fact, so it is reported
+    // before the user is asked to review a doomed comment.
     if (params.html) {
       const problems = validateHtmlText(params.text);
       if (problems.length > 0) {
         return toToolResult(
           `Asana: refused to post html_text (task ${params.task_gid}). Fix and retry, or drop the html flag to post as plain text:\n- ${problems.join("\n- ")}`,
+        );
+      }
+    }
+    const imagePaths = params.images ?? [];
+    if (imagePaths.length > 0) {
+      const problems = await validateImagePaths(imagePaths);
+      if (problems.length > 0) {
+        return toToolResult(
+          `Asana: refused to post comment (task ${params.task_gid}) - image attachment problem(s):\n- ${problems.join("\n- ")}`,
         );
       }
     }
@@ -128,7 +154,11 @@ export const addCommentTool: ToolDefinition<typeof Params, AsanaDetails> = {
     const decision = await confirmWrite(ctx, {
       title,
       editableText: params.text,
-      summary: params.text,
+      summary:
+        params.text +
+        (imagePaths.length > 0
+          ? `\n\n[attach: ${imagePaths.map((p) => p.split("/").pop()).join(", ")}]`
+          : ""),
     });
     if (!decision.proceed) {
       return toToolResult(
@@ -138,7 +168,50 @@ export const addCommentTool: ToolDefinition<typeof Params, AsanaDetails> = {
     const text = decision.text ?? params.text;
 
     try {
-      const body = params.html ? { html_text: text } : { text };
+      // Upload images BEFORE composing the story: each attachment returns the
+      // gid the inline <img> tag needs. On a mid-batch failure the already-
+      // attached files stay on the task (Asana binds attachments at upload
+      // time, unlike Slack), so the error names exactly what landed and what
+      // was skipped - the comment itself is never half-posted.
+      let attached: Array<{ gid: string; filename: string }> = [];
+      if (imagePaths.length > 0) {
+        attached = [];
+        for (let i = 0; i < imagePaths.length; i++) {
+          const file = await readImage(imagePaths[i]);
+          try {
+            const record = await callAsanaUpload<{ gid?: string; name?: string }>(
+              "/attachments",
+              file,
+              { parent: params.task_gid },
+            );
+            if (!record?.gid) {
+              throw new AsanaError(
+                `Asana: /attachments returned no gid for ${file.filename}.`,
+              );
+            }
+            attached.push({ gid: record.gid, filename: file.filename });
+          } catch (err) {
+            const landed =
+              attached.length > 0
+                ? ` Already attached (kept on the task): ${attached.map((a) => a.filename).join(", ")}.`
+                : "";
+            const detail = err instanceof Error ? err.message : String(err);
+            return toToolResult(
+              `Asana: failed uploading image ${i + 1}/${imagePaths.length} (${file.filename}) to task ${params.task_gid}: ${detail}.${landed} Comment NOT posted.`,
+            );
+          }
+        }
+      }
+
+      // With images, the story MUST be html_text (the <img> tags are the
+      // inline-embed mechanism), so buildStoryHtml composes the body in both
+      // modes. Without images the original text-vs-html_text choice applies.
+      const body: Record<string, unknown> =
+        attached.length > 0
+          ? { html_text: buildStoryHtml({ text, html: params.html === true, images: attached }) }
+          : params.html
+            ? { html_text: text }
+            : { text };
       const story = await callAsana<AsanaStory>(
         "POST",
         `/tasks/${encodeURIComponent(params.task_gid)}/stories`,
@@ -158,11 +231,15 @@ export const addCommentTool: ToolDefinition<typeof Params, AsanaDetails> = {
         )?.permalink_url;
       }
       const urlPart = permalink ? ` URL: ${permalink}` : "";
+      const imagePart =
+        attached.length > 0
+          ? ` Attached ${attached.length} image(s): ${attached.map((a) => a.filename).join(", ")} (inline on the comment + in the task's Files).`
+          : "";
       const { extraText, details } = postedContentExtras(text, decision.edited ?? false);
       return toToolResult(
         `Asana: comment added to task ${params.task_gid} (story gid: ${story.gid}, at ${
           story.created_at ?? "(no timestamp)"
-        }).${urlPart}${extraText}`,
+        }).${urlPart}${imagePart}${extraText}`,
         details,
       );
     } catch (err) {

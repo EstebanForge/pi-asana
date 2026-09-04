@@ -179,6 +179,85 @@ export async function callAsana<T = unknown>(
   }
 }
 
+// Multipart upload for POST /attachments. The JSON path cannot carry files:
+// this endpoint takes multipart/form-data with a `parent` field (task gid)
+// and the binary `file` part. fetch() sets the multipart boundary itself, so
+// NO Content-Type header is set manually (a hand-written one without the
+// boundary makes Asana return 400). resource_subtype is deliberately never
+// sent: the default ("asana") is the only subtype Asana accepts as an inline
+// image in a story; "external" gets rejected with "Not a valid image asset id".
+// Mirror of Asana's own 100 MB per-attachment ceiling (same cap the download
+// path enforces) so an oversized file is refused before it is read.
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+export async function callAsanaUpload<T = unknown>(
+  path: string,
+  file: { filename: string; bytes: Buffer; contentType: string },
+  fields: Record<string, string> = {},
+): Promise<T> {
+  if (file.bytes.byteLength > MAX_UPLOAD_BYTES) {
+    throw new AsanaError(
+      `Attachment too large (${file.bytes.byteLength} bytes > ${MAX_UPLOAD_BYTES} byte cap). Asana rejects uploads over 100 MB.`,
+    );
+  }
+  const token = getAsanaToken();
+  const url = buildUrl(DEFAULT_BASE_URL, path, undefined);
+
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) {
+    form.append(key, value);
+  }
+  form.append(
+    "file",
+    new Blob([new Uint8Array(file.bytes)], { type: file.contentType }),
+    file.filename,
+  );
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      body: form,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("abort")) {
+      throw new AsanaError(
+        `Asana upload timed out after ${REQUEST_TIMEOUT_MS / 1000}s. Retry; if persistent, check the network or the Asana status page.`,
+      );
+    }
+    throw new AsanaError(`Network error uploading to Asana: ${msg}`);
+  }
+
+  try {
+    if (!response.ok) {
+      let parsed: AsanaErrorBody | null = null;
+      const text = await response.text();
+      try {
+        parsed = JSON.parse(text) as AsanaErrorBody;
+      } catch {
+        // Body was not JSON; surface raw text via friendlyStatus fallback.
+      }
+      throw new AsanaError(friendlyStatus(response.status, parsed), response.status);
+    }
+    // Same {data: ...} envelope as callAsana; the attachment compact record
+    // (gid, name, ...) arrives wrapped.
+    const json = (await response.json()) as { data?: T } | T;
+    if (json && typeof json === "object" && "data" in (json as Record<string, unknown>)) {
+      return (json as { data: T }).data;
+    }
+    return json as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Fetch a raw external URL and return its bytes. Used to download Asana
 // attachments: GET /attachments/{gid} returns a `download_url` pointing at an
 // Asana-hosted S3 object, and that S3 URL MUST be fetched WITHOUT the Bearer

@@ -27,7 +27,7 @@ pi install npm:@estebanforge/pi-asana-me
 | `asana_get_me` | Who am I in Asana + my workspaces |
 | `asana_create_tasks` | Create up to 50 tasks in a single call. Write. |
 | `asana_update_tasks` | Update up to 50 tasks in a single call. Write. |
-| `asana_add_comment` | Add a text or HTML comment to a task. Write. |
+| `asana_add_comment` | Add a text or HTML comment to a task; attach local images with `images`. Write. |
 | `asana_update_comment` | Edit the text of a comment previously posted (own comments only). Write. |
 | `asana_get_custom_fields` | Read every custom field on a task: name, type (text/number/enum), enum options, current value, gid. Read. |
 | `asana_set_custom_fields` | Set custom fields by name (enum options resolve to gids; text/number coerced; null clears). Write. |
@@ -173,6 +173,18 @@ text: <body>Ship cutoff is <strong>Friday</strong>. CC <a data-asana-gid="123"><
 html: true
 text: <p>One paragraph.</p><p>Another.</p>      // no <body>; <p> unsupported
 ```
+
+## Image attachments on comments
+
+`asana_add_comment` accepts local image paths via the `images` param (png, jpg, jpeg, gif, webp, bmp, svg). Asana's API has no comment-level upload, so the tool does what the Asana web app does: each file uploads to the task (`POST /attachments`, multipart, `parent` = task gid), and the comment embeds it inline with one [`<img data-asana-gid="GID"/>`](https://developers.asana.com/docs/rich-text) tag per attachment. The images render on the comment AND appear in the task's Files section.
+
+Details worth knowing:
+
+- Plain-text comments are XML-escaped and wrapped in `<body>` automatically; `html: true` bodies get the `<img>` tags spliced in before `</body>` after the normal validation.
+- The upload omits `resource_subtype` on purpose: only the default (`asana`) subtype is accepted as an inline image; `external` attachments are rejected with "Not a valid image asset id".
+- 100 MB per-file cap, mirroring Asana's own limit.
+- Failure semantics: a failed upload aborts before the comment is posted, and the error names any files that DID attach (they stay on the task). If the comment post itself fails, the already-attached files remain in Files.
+- Paths are checked (exists + supported type) before the review dialog opens.
 
 ## License
 

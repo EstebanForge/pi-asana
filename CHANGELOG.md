@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.0 — 2026-09-05
+
+### Added
+- **Image attachments on `asana_add_comment`.** New optional `images` param takes local file paths (png, jpg, jpeg, gif, webp, bmp, svg). Each file uploads to the task via `POST /attachments` (multipart, `parent` = task gid) and the comment embeds it inline with one `<img data-asana-gid="GID"/>` per attachment — the documented rich-text mechanism — so the image renders ON the comment and also lands in the task's Files section.
+- `lib/attachments.ts` — image type detection/validation, XML escaping for the plain-text path (the story goes out as `html_text` whenever images are attached), and `buildStoryHtml` which wraps plain text or splices `<img>` tags before `</body>` in the `html: true` path (user markup is still validated by the existing guard first).
+- `lib/api.ts` `callAsanaUpload` — multipart upload path (fetch `FormData`; no manual Content-Type so the boundary is set correctly). `resource_subtype` is deliberately never sent: only the default (`asana`) subtype is accepted as an inline image. 100 MB cap mirrors Asana's own per-attachment ceiling.
+- Paths are validated (exists + supported type) BEFORE the review dialog. Failure semantics are reported exactly: a failed upload aborts before the story is posted and names any files that did attach (they stay on the task); a failed story post leaves the attachments in Files.
+
 ## 1.6.1 — 2026-08-12
 
 ### Added

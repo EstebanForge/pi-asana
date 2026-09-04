@@ -181,7 +181,7 @@ export const SET_CUSTOM_FIELDS_FIELDS_DESCRIPTION =
 
 export const ADD_COMMENT_TITLE = "Asana: Add Comment";
 
-export const ADD_COMMENT_DESCRIPTION = `Post a comment (story) to a task. Use for discussion, not auto-logged actions. Body defaults to plain text; set html=true to send Asana html_text for @-mentions or inline formatting. When html=true the body MUST follow the html_text rules on the \`text\` parameter (single <body> wrapper, allowed tags only) or Asana silently stores the ENTIRE comment as literal text with the tags visible and NO error (HTTP 201).`;
+export const ADD_COMMENT_DESCRIPTION = `Post a comment (story) to a task. Use for discussion, not auto-logged actions. Body defaults to plain text; set html=true to send Asana html_text for @-mentions or inline formatting. When html=true the body MUST follow the html_text rules on the \`text\` parameter (single <body> wrapper, allowed tags only) or Asana silently stores the ENTIRE comment as literal text with the tags visible and NO error (HTTP 201). Attach local images with images (png/jpg/gif/webp/bmp/svg): each uploads to the task and renders inline on the comment.`;
 
 export const ADD_COMMENT_TASK_DESCRIPTION = "Target task GID.";
 
@@ -198,6 +198,9 @@ export const ADD_COMMENT_TEXT_DESCRIPTION = [
   "- A mention only notifies that user if they are already a follower or assignee of the task; otherwise add them as a follower first.",
   "- Escape literal < and & in prose; > is allowed in text content (so PHP \"=>\" is fine).",
 ].join(" ");
+
+export const ADD_COMMENT_IMAGES_DESCRIPTION =
+  "Local image file paths to attach (png, jpg, jpeg, gif, webp, bmp, svg). Each file uploads to the task (POST /attachments) and the comment embeds it inline via <img data-asana-gid>. Attached images also appear in the task's Files section.";
 
 export const UPDATE_COMMENT_TITLE = "Asana: Update Comment";
 
